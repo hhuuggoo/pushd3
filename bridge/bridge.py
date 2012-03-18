@@ -9,6 +9,7 @@ log = logging.getLogger(__name__)
 import simplejson
 from gevent import spawn
 import Queue
+import hashlib
 
 # demo app
 class ZmqGatewayFactory(object):
@@ -19,6 +20,7 @@ class ZmqGatewayFactory(object):
         self.gateways = {}
         self.ctx = zmq.Context()
         self.HWM = HWM
+        
     def get(self, socket_type, zmq_conn_string):
         if (socket_type, zmq_conn_string) in self.gateways:
             gateway =  self.gateways[socket_type, zmq_conn_string]
@@ -28,6 +30,12 @@ class ZmqGatewayFactory(object):
                 log.debug("spawning req socket %s" ,zmq_conn_string) 
                 self.gateways[socket_type, zmq_conn_string] = \
                                 ReqGateway(zmq_conn_string,
+                                           self.HWM,
+                                           ctx=self.ctx)
+            elif socket_type == zmq.REP:
+                log.debug("spawning rep socket %s" ,zmq_conn_string)
+                self.gateways[socket_type, zmq_conn_string] = \
+                                RepGateway(zmq_conn_string,
                                            self.HWM,
                                            ctx=self.ctx)
             else:
@@ -106,6 +114,56 @@ class SubGateway(ZmqGateway):
     def start(self):
         self.thread = spawn(self.run)
         
+class RepGateway(ZmqGateway):
+    def __init__(self, zmq_conn_string, HWM, ctx=None):
+        super(RepGateway, self).__init__(zmq_conn_string, ctx=ctx)
+        self.s = ctx.socket(zmq.XREP)
+        if HWM:
+            self.s.setsockopt(zmq.HWM, 100);
+        self.s.bind(zmq_conn_string)
+        self.queue = Queue.Queue()
+        self.addresses = {}
+        
+    def send(self, identity, msg):
+        self.queue.put(msg)
+
+    def _send(self, multipart_msg):
+        multipart_msg = [str(x) for x in multipart_msg]
+        log.debug('sending %s', multipart_msg)
+        self.s.send_multipart(multipart_msg)
+        
+    def run_recv_zmq(self):    
+        while True:
+            msg = self.s.recv_multipart(copy=True)
+            log.debug('received %s', msg)
+            try:
+                target_ident = msg[-1]
+                address_idx = msg.index('')
+                address_data = msg[:address_idx]
+                hashval = hashlib.sha1(str(address_data)).hexdigest()
+                self.addresses[hashval] = address_data
+                newmsg = [hashval] + [str(x) for x in \
+                                      msg[address_idx:-1]]
+                msg = simplejson.dumps(newmsg)
+                self.send_proxy(target_ident, msg)
+            except:
+                pass
+            
+    def run_send_zmq(self):
+        while True:
+            try:
+                obj = self.queue.get()
+                log.debug('ws received %s', obj)
+                obj = simplejson.loads(obj)
+                address_data = self.addresses[obj[0]]
+                self._send(address_data + obj[1:])
+            except:
+                pass
+            
+    def start(self):
+        self.thread_recv = spawn(self.run_recv_zmq)
+        self.thread_send = spawn(self.run_send_zmq)
+    
 class ReqGateway(ZmqGateway):
     def __init__(self, zmq_conn_string, HWM, ctx=None):
         super(ReqGateway, self).__init__(zmq_conn_string, ctx=ctx)
@@ -177,6 +235,8 @@ class BridgeWebProxyHandler(WebProxyHandler):
         socket_type = content['socket_type']
         if socket_type == zmq.REQ:
             proxy = ReqSocketProxy(identity)
+        elif socket_type == zmq.REP:
+            proxy = RepSocketProxy(identity)
         else:
             proxy = SubSocketProxy(identity, content.get('msgfilter', ''))
         gateway = self.gateway_factory.get(socket_type, zmq_conn_string)
@@ -193,10 +253,10 @@ class BridgeWebProxyHandler(WebProxyHandler):
             if self.zmq_allowed(content):
                 self.connect(identity, content)
                 content = simplejson.dumps({'status' : 'success'})
-                self.send(identity, content)
+                self.send(identity, content, msg_type='connection_reply')
             else:
                 content = simplejson.dumps({'status' : 'error'})
-                self.send(identity, content)
+                self.send(identity, content, msg_type='connection_reply')
         else:
             self.send_proxy(identity, content)
             
@@ -208,10 +268,14 @@ class BridgeWebProxyHandler(WebProxyHandler):
             log.exception(e)
             self.deregister(identity)
 
-    def send(self, identity, msg):
-        log.debug('ws sent %s', msg)
-        self.ws.send(simplejson.dumps({'identity' : identity,
-                                       'content' : msg}))
+    def send(self, identity, msg, msg_type=None):
+        json_msg = {'identity' : identity,
+                    'content' : msg}
+        if msg_type is not None:
+            json_msg['msg_type'] = msg_type
+        log.debug('ws sent %s', json_msg)
+        self.ws.send(simplejson.dumps(json_msg))
+        
     def run(self):
         while True:
             msg = self.ws.receive()
@@ -253,6 +317,9 @@ class SocketProxy(object):
         
 class ReqSocketProxy(SocketProxy):
     socket_type = zmq.REQ
+    
+class RepSocketProxy(SocketProxy):
+    socket_type = zmq.REP
 
 
 class SubSocketProxy(SocketProxy):

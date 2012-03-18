@@ -1,16 +1,31 @@
-import gevent
-from gevent_zeromq import zmq
+import zmq
+import simplejson as jsonapi
 import logging
 log = logging.getLogger(__name__)
-import simplejson
-from gevent import spawn
-import collections
-import logging
-import time
-log = logging.getLogger('__name__')
-jsonapi = simplejson
 
-class GeventZMQRPC(object):
+class RPCClient(object):
+    def __init__(self, socket, ident, timeout=1000.0):
+        self.socket = socket
+        self.ident = ident
+        self.timeout = timeout
+        self.poller = zmq.Poller()
+        self.poller.register(self.socket, zmq.POLLIN)
+        
+    def rpc(self, funcname, *args, **kwargs):
+        msg = {'funcname' : funcname,
+               'args' : args}
+        self.socket.send_multipart(['', jsonapi.dumps(msg), self.ident])
+
+        socks = dict(self.poller.poll(timeout=self.timeout))
+        if self.socket in socks:
+            message = self.socket.recv_multipart()
+            print message
+            msgobj = jsonapi.loads(message[-1])
+            return msgobj['returnval']
+        else:
+            return None
+
+class RPCServer(object):
     #none, means we can rpc any function
     #explicit iterable means, only those
     #functions in the iterable can be executed
@@ -18,25 +33,32 @@ class GeventZMQRPC(object):
     
     authorized_functions = None 
     
-    def __init__(self, reqrep_socket):
+    def __init__(self, reqrep_socket, timeout=1000.0):
         self.reqrep_socket = reqrep_socket
-
+        self.poller = zmq.Poller()
+        self.poller.register(self.reqrep_socket, zmq.POLLIN)
+        self.kill = False
+        self.timeout = timeout
+        
     def run_rpc(self):
         while True:
-            try:
-                #the follow code must be wrapped in an exception handler
-                #we don't know what we're getting
-                msg = self.reqrep_socket.recv()
-                msgobj = jsonapi.loads(msg)
-                response_obj = self.get_response(msgobj)
-                response = jsonapi.dumps(response_obj)
-                
-            except Exception as e:
-                log.exception(e)
-                response_obj = self.error_obj('unknown error')
-                response = jsonapi.dumps(response_obj)
-                
-            self.reqrep_socket.send(jsonapi.dumps(response_obj))
+            #the follow code must be wrapped in an exception handler
+            #we don't know what we're getting
+            socks = dict(self.poller.poll(timeout=self.timeout))
+            if self.reqrep_socket in socks:
+                try:
+                    msg = self.reqrep_socket.recv()
+                    msgobj = jsonapi.loads(msg)
+                    response_obj = self.get_response(msgobj)
+                    response = jsonapi.dumps(response_obj)
+                except Exception as e:
+                    log.exception(e)
+                    response_obj = self.error_obj('unknown ooger')
+                    response = jsonapi.dumps(response_obj)
+                self.reqrep_socket.send(jsonapi.dumps(response_obj))
+            else:
+                if self.kill:
+                    break
 
     def error_obj(self, error_msg):
         return {'status' : 'error',
@@ -62,21 +84,3 @@ class GeventZMQRPC(object):
         func = getattr(self, funcname)
         retval = func(*args, **kwargs)
         return self.returnval_obj(retval)
-        
-                       
-        
-class PubSubRPCClient(object):
-    def __init__(self, socket):
-        self.socket = socket
-        self.queue = gevent.queue.Queue()
-        
-    def rpc(self, funcname, *args, **kwargs):
-        msg = {'funcname' : funcname,
-               'args' : args}
-        self.queue.put(jsonapi.dumps(msg))
-
-    def run_pub(self):
-        while True:
-            msg = self.queue.get()
-            self.socket.send(msg)
-                        
