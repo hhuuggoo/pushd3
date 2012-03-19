@@ -37,12 +37,12 @@ rpcclient2 = bridgeutils.RPCClient(s3, server.d3identity)
 jq = push.RemoteChain(rpcclient)
 d3 = push.RemoteChain(rpcclient2)
 
-jq('body').append('<svg id="chart1"></svg>').remote()
-jq('#chart1').height(100).remote()
-jq('#chart1').width(100).remote()
-
 d3.push.gridplot('body', 2, 2, 100, 100, 'chart')
-d3.push.scatter('#chart1', json_data, 'x', 'y', 'circle')
+d3.push.scatter('#chart_0_0', json_data, 'x', 'y', 'circle')
+d3.push.scatter('#chart_1_0', json_data, 'y', 'z', 'circle')
+d3.push.scatter('#chart_0_1', json_data, 'w', 'z', 'circle')
+d3.push.scatter('#chart_1_1', json_data, 'w', 'w', 'circle')
+d3.select('#chart_1_1').selectAll('circle').attr('r', 5)
 
 
 
