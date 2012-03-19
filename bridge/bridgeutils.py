@@ -21,7 +21,7 @@ class RPCClient(object):
             message = self.socket.recv_multipart()
             print message
             msgobj = jsonapi.loads(message[-1])
-            return msgobj['returnval']
+            return msgobj.get('returnval', None)
         else:
             return None
 
